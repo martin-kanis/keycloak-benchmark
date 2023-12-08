@@ -2,6 +2,7 @@ package org.keycloak.benchmark.crossdc;
 
 import org.apache.http.client.utils.URIBuilder;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import javax.net.ssl.SSLContext;
@@ -11,10 +12,12 @@ import javax.net.ssl.X509ExtendedTrustManager;
 import java.io.IOException;
 import java.net.CookieHandler;
 import java.net.CookieManager;
+import java.net.InetAddress;
 import java.net.Socket;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLEncoder;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -148,12 +151,15 @@ public class CrossDCTest {
         }
     }
 
-    @Test
-    public void loginLogoutTest() throws URISyntaxException, IOException, InterruptedException {
+    @BeforeEach
+    public void clearSessions() throws URISyntaxException, IOException, InterruptedException {
         //Clear the Session Cache data from both data centers
         clearCacheData(dc1.getInfinispanServerURL(),"sessions");
         clearCacheData(dc2.getInfinispanServerURL(),"sessions");
+    }
 
+    @Test
+    public void loginLogoutTest() throws URISyntaxException, IOException, InterruptedException {
         //Login and exchange code in DC1
         String code = usernamePasswordLogin(dc1, "user-1", "user-1-password");
         Map<String, Object> tokensMap = exchangeCode(dc1, code, "client-0", "client-0-secret", 200);
@@ -181,6 +187,8 @@ public class CrossDCTest {
         assertEquals(1,Integer.parseInt(ispnDC2Response.body().toString()));
         //Verify session cache size in embedded ISPN DC2
         assertEquals(1, (Integer) getNestedValue(getEmbeddedISPNstats(dc2),"cacheSizes","sessions"));
+
+        takeSiteDown(dc1);
 
         //Logout from DC1
         logout(dc1, (String) tokensMap.get("id_token"), "client-0");
@@ -279,6 +287,74 @@ public class CrossDCTest {
 
         while (!httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body().contains("No task in progress.")) {
             Thread.sleep(500);
+        }
+    }
+
+    @Test
+    public void logoutUserWithFailoverTest() throws IOException, URISyntaxException, InterruptedException {
+        // Login and exchange code in DC1
+        String code = usernamePasswordLogin(dc1, "user-1", "user-1-password");
+        Map<String, Object> tokensMap = exchangeCode(dc1, code, "client-0", "client-0-secret", 200);
+
+        takeSiteDown(dc1);
+        waitUntilPrimarySiteIsDown();
+
+        // Verify if the user session UUID in code, we fetched from Keycloak exists in session cache key of external ISPN in DC2
+        HttpResponse verifySessionKeyResponseInDC2 = getISPNStats(dc2, "sessions", "keys");
+        assertTrue(verifySessionKeyResponseInDC2.body().toString().contains(code.toString().split("[.]")[1]));
+
+        tokensMap = refreshToken(dc2, (String) tokensMap.get("refresh_token"), "client-0", "client-0-secret", 200);
+
+        logout(dc2, (String) tokensMap.get("id_token"), "client-0");
+
+        refreshToken(dc2, (String) tokensMap.get("refresh_token"), "client-0", "client-0-secret", 400);
+    }
+
+    private void takeSiteDown(DatacenterInfo dc) throws URISyntaxException, IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(new URI(dc.getSiteDownURL()))
+                .GET()
+                .build();
+
+        httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+    private void takeSiteUp(DatacenterInfo dc) throws URISyntaxException, IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(new URI(dc.getSiteUpURL()))
+                .GET()
+                .build();
+
+        httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+    private boolean isPrimaryActive(String clientUrl, String primaryUrl, String backupUrl) throws UnknownHostException {
+        InetAddress[] clientAddresses = InetAddress.getAllByName(clientUrl);
+        Object[] clientIPs = Arrays.stream(clientAddresses).map(InetAddress::getHostAddress).sorted().toArray();
+
+        InetAddress[] primaryAddresses = InetAddress.getAllByName(primaryUrl);
+        Object[] primaryIPs = Arrays.stream(primaryAddresses).map(InetAddress::getHostAddress).sorted().toArray();
+
+        InetAddress[] backupAddresses = InetAddress.getAllByName(backupUrl);
+        Object[] backupIPs = Arrays.stream(backupAddresses).map(InetAddress::getHostAddress).sorted().toArray();
+
+        if (Arrays.equals(clientIPs, primaryIPs) && !Arrays.equals(clientIPs, backupIPs)) {
+            System.out.println("Client's subdomain points to the same IP as the primary subdomain (Primary is UP).");
+            return true;
+        }
+        else {
+            System.out.println("Client's subdomain does not point to the same IP as the primary subdomain (Primary is DOWN).");
+            return false;
+        }
+    }
+
+    private void waitUntilPrimarySiteIsDown() throws UnknownHostException, InterruptedException {
+        String clientUrl = dc1.getLoadBalancerURL();
+        String primaryUrl = dc1.getKeycloakServerURL();
+        String backupUrl = dc2.getKeycloakServerURL();
+
+        while (isPrimaryActive(clientUrl, primaryUrl, backupUrl)) {
+            Thread.sleep(5000);
         }
     }
 
@@ -400,6 +476,26 @@ public class CrossDCTest {
         formData.put("client_secret", clientSecret);
         formData.put("redirect_uri", dc.getRedirectURI());
         formData.put("code", code);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .uri(new URI(dc.getTokenEndpoint()))
+                .POST(HttpRequest.BodyPublishers.ofString(getFormDataAsString(formData)))
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        assertEquals(expectedReturnCode, response.statusCode());
+
+        return JsonSerialization.readValue(response.body(), Map.class);
+    }
+
+    private Map<String, Object> refreshToken(DatacenterInfo dc, String refreshToken, String clientId, String clientSecret, int expectedReturnCode) throws URISyntaxException, IOException, InterruptedException {
+        Map<String, String> formData = new HashMap<>();
+        formData.put("grant_type", "refresh_token");
+        formData.put("refresh_token", refreshToken);
+        formData.put("client_id", clientId);
+        formData.put("client_secret", clientSecret);
+        formData.put("redirect_uri", dc.getRedirectURI());
 
         HttpRequest request = HttpRequest.newBuilder()
                 .header("Content-Type", "application/x-www-form-urlencoded")
