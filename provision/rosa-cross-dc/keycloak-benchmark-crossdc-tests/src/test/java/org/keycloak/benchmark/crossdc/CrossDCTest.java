@@ -171,6 +171,8 @@ public class CrossDCTest {
         //Verify session cache size in embedded ISPN DC2
         assertEquals(1, (Integer) getNestedValue(getEmbeddedISPNstats(dc2, "sessions"),"cacheSizes","sessions"));
 
+        takeSiteDown(dc1);
+
         //Logout from DC1
         logout(dc1, (String) tokensMap.get("id_token"), "client-0");
 
@@ -187,6 +189,24 @@ public class CrossDCTest {
         assertEquals(0,Integer.parseInt(ispnDC2ResponseAfterLogout.body().toString()));
         //Verify session cache size in embedded ISPN DC2
         assertEquals(0, (Integer) getNestedValue(getEmbeddedISPNstats(dc2, "sessions"),"cacheSizes","sessions"));
+    }
+
+    private void takeSiteDown(DatacenterInfo dc) throws URISyntaxException, IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(new URI(dc.getSiteDownURL()))
+                .GET()
+                .build();
+
+        httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+    private void takeSiteUp(DatacenterInfo dc) throws URISyntaxException, IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(new URI(dc.getSiteUpURL()))
+                .GET()
+                .build();
+
+        httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
     }
 
     private void clearCacheData(String ispnServerRestEndpoint, String cacheName) throws URISyntaxException, IOException, InterruptedException {

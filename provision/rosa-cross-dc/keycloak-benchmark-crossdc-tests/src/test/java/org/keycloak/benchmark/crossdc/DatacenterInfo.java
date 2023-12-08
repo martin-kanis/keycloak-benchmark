@@ -17,6 +17,9 @@ public class DatacenterInfo {
     private final String datasetLastUserURL;
     private final String datasetCacheStatsURL;
 
+    private final String siteDownURL;
+    private final String siteUpURL;
+
     public DatacenterInfo(String keycloakServerURL, String testRealm, String infinispanServerURL) {
         this.keycloakServerURL = keycloakServerURL;
         this.infinispanServerURL = infinispanServerURL;
@@ -32,6 +35,9 @@ public class DatacenterInfo {
         this.datasetLastClientURL = keycloakServerURL + "/realms/master/dataset/last-client?realm-name=" + testRealm;
         this.datasetLastUserURL = keycloakServerURL + "/realms/master/dataset/last-user?realm-name=" + testRealm;
         this.datasetCacheStatsURL = keycloakServerURL + "/realms/master/cache/sizes";
+
+        this.siteDownURL = keycloakServerURL + "/realms/master/dataset/take-dc-down";
+        this.siteUpURL = keycloakServerURL + "/realms/master/dataset/take-dc-up";
     }
 
     public DatacenterInfo(String keycloakServerURL, String infinispanRestEndpointURL) {
@@ -84,4 +90,11 @@ public class DatacenterInfo {
 
     public String getDatasetCacheStatsURL() {return datasetCacheStatsURL;}
 
+    public String getSiteDownURL() {
+        return siteDownURL;
+    }
+
+    public String getSiteUpURL() {
+        return siteUpURL;
+    }
 }
